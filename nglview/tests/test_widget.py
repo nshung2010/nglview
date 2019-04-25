@@ -236,12 +236,17 @@ def test_API_promise_to_have():
     view.add_representation('surface', selection='*', component=1)
     view.center()
     view._hold_image = True
-    view._on_render_image(change=dict(new=u'xyz'))
+    image_data = 'eyJ1IjogInRlc3QifQ=='
+    view._on_render_image(change=dict(new=image_data))
     view._hold_image = False
-    view._on_render_image(change=dict(new=u'xyz'))
+    view._on_render_image(change=dict(new=image_data))
     view.render_image()
     view.render_image(frame=2)
     view.download_image()
+
+    view.save_snapshot('what.png')
+    view._on_render_image(change=dict(new=image_data))
+    assert view._write_image == False
 
     msg = dict(type='request_frame', data=dict())
     view._ngl_handle_msg(view, msg=msg, buffers=[])
@@ -603,33 +608,6 @@ def test_encode_and_decode():
     b64_str = encode_base64(xyz)
     new_xyz = decode_base64(b64_str, dtype='f4', shape=shape)
     aa_eq(xyz, new_xyz)
-
-
-@unittest.skipUnless(has_MDAnalysis, 'skip if not having MDAnalysis')
-def test_coordinates_meta():
-    from mdtraj.testing import get_fn
-    fn, tn = [
-        get_fn('frame0.pdb'),
-    ] * 2
-    trajs = [pt.load(fn, tn), md.load(fn, top=tn), pmd.load_file(tn, fn)]
-
-    N_FRAMES = trajs[0].n_frames
-
-    from MDAnalysis import Universe
-    u = Universe(tn, fn)
-    trajs.append(Universe(tn, fn))
-
-    views = [
-        nv.show_pytraj(trajs[0]),
-        nv.show_mdtraj(trajs[1]),
-        nv.show_parmed(trajs[2])
-    ]
-    views.append(nv.show_mdanalysis(trajs[3]))
-
-    for index, (view, traj) in enumerate(zip(views, trajs)):
-        view.frame = 3
-
-        assert view._trajlist[0].n_frames == N_FRAMES
 
 
 def test_structure_file():

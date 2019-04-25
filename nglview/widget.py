@@ -112,7 +112,11 @@ class NGLWidget(DOMWidget):
     # _model_name = Unicode("NGLView").tag(sync=True)
     # _model_module = Unicode("nglview-js-widgets").tag(sync=True)
     _image_data = Unicode().tag(sync=True)
+    _write_image = False
+    _write_image_fname = None
     # use Integer here, because mdtraj uses a long datatype here on Python-2.7
+    _ipy_image = Image(value=b"")
+    _ipy_image.width = '99%'
     frame = Integer().tag(sync=True)
     count = Integer(1).tag(sync=True)
     background = Unicode('white').tag(sync=True)
@@ -908,8 +912,32 @@ class NGLWidget(DOMWidget):
         method name might be changed
         '''
         self._widget_image._b64value = change['new']
+        self._ipy_image.value = base64.b64decode(change['new'])
         if self._hold_image:
             self._image_array.append(change['new'])
+        if self._write_image:
+            with open(self._write_image_fname, 'wb') as fh:
+                fh.write(self._ipy_image.value)
+            self._write_image = False
+
+    def save_snapshot(self, fname, **kwargs):
+        """render and save scene at current frame
+
+        Parameters
+        ----------
+        filename : str
+        factor : int, default 4
+            quality of the image, higher is better
+        antialias : bool, default True
+        trim : bool, default False
+        transparent : bool, default False
+
+        NOTE: This `save_snapshot` is an enhancement of `download_image` where
+            user can save the image to an arbitrary path.
+        """
+        self._write_image = True
+        self._write_image_fname = fname
+        self.render_image(**kwargs)
 
     def render_image(self,
                      frame=None,
@@ -930,14 +958,6 @@ class NGLWidget(DOMWidget):
         trim : bool, default False
         transparent : bool, default False
 
-        Examples
-        --------
-            # tell NGL to render send image data to notebook.
-            view.render_image()
-            
-            # make sure to call `get_image` method
-            view.get_image()
-
         Notes
         -----
         You need to call `render_image` and `get_image` in different notebook's Cells
@@ -950,6 +970,7 @@ class NGLWidget(DOMWidget):
             trim=trim,
             transparent=transparent)
         self._remote_call('_exportImage', target='Widget', kwargs=params)
+        return self._ipy_image
 
     def download_image(self,
                        filename='screenshot.png',
