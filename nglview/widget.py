@@ -1,4 +1,5 @@
 from __future__ import print_function, absolute_import
+import os
 import threading
 import time
 import base64
@@ -936,7 +937,7 @@ class NGLWidget(DOMWidget):
             user can save the image to an arbitrary path.
         """
         self._write_image = True
-        self._write_image_fname = fname
+        self._write_image_fname = os.path.abspath(fname)
         self.render_image(**kwargs)
 
     def render_image(self,
@@ -970,7 +971,6 @@ class NGLWidget(DOMWidget):
             trim=trim,
             transparent=transparent)
         self._remote_call('_exportImage', target='Widget', kwargs=params)
-        return self._ipy_image
 
     def download_image(self,
                        filename='screenshot.png',
