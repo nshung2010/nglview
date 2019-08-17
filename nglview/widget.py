@@ -9,11 +9,11 @@ import ipywidgets as widgets
 import ipywidgets.embed
 import numpy as np
 from IPython.display import display
-from ipywidgets import (Box, DOMWidget, HBox, IntSlider, Output, Play, Widget,
+from ipywidgets import (Image, Box, DOMWidget, HBox, VBox, IntSlider, Output, Play, Widget,
                         jslink)
 from ipywidgets import widget as _widget
 from traitlets import (Bool, CaselessStrEnum, Dict, Instance, Int, Integer,
-                       List, Unicode, observe)
+                       List, Unicode, observe, validate)
 import traitlets
 
 from . import color, interpolate
@@ -30,16 +30,12 @@ from .utils.py_utils import (FileManager, _camelize_dict, _update_url,
                              encode_base64, get_repr_names_from_dict,
                              seq_to_string)
 from .viewer_control import ViewerControl
+from ._frontend import __frontend_version__
+from .base import BaseWidget
 
 widget_serialization = _widget.widget_serialization
-try:
-    # ipywidgets >= 7.4
-    from ipywidgets import Image
-except ImportError:
-    from ipywidgets.widget_image import Image
 
 __all__ = ['NGLWidget', 'ComponentViewer']
-__frontend_version__ = '2.6.1'  # must match to js/package.json
 _EXCLUDED_CALLBACK_AFTER_FIRING = {
     'setUnSyncCamera',
     'setSelector',
@@ -85,6 +81,16 @@ def write_html(fp, views, frame_range=None):
     """
     views = isinstance(views, DOMWidget) and [views] or views
     embed = ipywidgets.embed
+    color = None
+    theme = None
+    for k, v in views[0].widgets.items():
+        if v.__class__.__name__ == '_ColormakerRegistry':
+            color = v
+        if v.__class__.__name__ == 'ThemeManager':
+            theme = v
+
+    for v in [color, theme]:
+        v and views.insert(0, v)
 
     def _set_serialization(views):
         for view in views:
@@ -119,6 +125,7 @@ def write_html(fp, views, frame_range=None):
     _unset_serialization(views)
 
 
+
 class NGLWidget(DOMWidget):
     _view_name = Unicode("NGLView").tag(sync=True)
     _view_module = Unicode("nglview-js-widgets").tag(sync=True)
@@ -151,7 +158,8 @@ class NGLWidget(DOMWidget):
                                   default_value='orthographic').tag(sync=True)
     _camera_orientation = List().tag(sync=True)
     _synced_model_ids = List().tag(sync=True)
-    _ngl_view_id = List().tag(sync=True)
+    _synced_repr_model_ids = List().tag(sync=True)
+    _ngl_view_id = List(Unicode).tag(sync=True)
     _ngl_repr_dict = Dict().tag(sync=True)
     _ngl_component_ids = List().tag(sync=False)
     _ngl_component_names = List().tag(sync=False)
@@ -160,7 +168,7 @@ class NGLWidget(DOMWidget):
     _init_gui = Bool(False).tag(sync=False)
     gui_style = CaselessStrEnum(['ngl'], allow_none=True).tag(sync=True)
     _gui_theme = CaselessStrEnum(['dark', 'light'], allow_none=True).tag(sync=True)
-    _hold_image = Bool(False).tag(sync=False)
+    _widget_theme = None
     _ngl_serialize = Bool(False).tag(sync=True)
     _ngl_msg_archive = List().tag(sync=True)
     _ngl_coordinate_resource = Dict().tag(sync=True)
@@ -345,18 +353,25 @@ class NGLWidget(DOMWidget):
     def _request_stage_parameters(self):
         self._remote_call('requestUpdateStageParameters', target='Widget')
 
+    @validate('gui_style')
+    def _validate_gui_style(self, proposal):
+        val = proposal['value']
+        if val == 'ngl':
+            if self._widget_theme is None:
+                from .theme import ThemeManager
+                self._widget_theme = ThemeManager()
+                if self._widget_theme._theme is None:
+                    self._widget_theme.light()
+        return val
+
     @observe("_gui_theme")
     def _on_theme_changed(self, change):
         # EXPERIMENTAL
         from nglview.theme import theme
         if change.new == 'dark':
-            self._remote_call("updateNGLTheme",
-                    args=[theme._get_css_content('dark.css', include_style_tag=False)],
-                    fire_embed=True)
+            self._widget_theme.dark()
         elif change.new == 'light':
-            # default theme is light, so we just need to remove previous theme
-            self._remote_call("updateNGLTheme",
-                    args=[""], fire_embed=True)
+            self._widget_theme.light()
 
     @observe('picked')
     def _on_picked(self, change):
@@ -368,6 +383,10 @@ class NGLWidget(DOMWidget):
     def _update_background_color(self, change):
         color = change['new']
         self.stage.set_parameters(background_color=color)
+
+    def handle_resize(self):
+        # self._remote_call("handleResize", target='Stage')
+        self._remote_call("handleResize")
 
     @observe('n_components')
     def _handle_n_components_changed(self, change):
@@ -503,17 +522,32 @@ class NGLWidget(DOMWidget):
                 self._gui = self.player._display()
             display(self._gui)
 
-    def display(self, gui=False, use_box=False):
+    def display(self, gui=False, style='ngl'):
+        """
+
+        Parameters
+        ----------
+        gui : bool
+            If True: turn on GUI
+        style : str, {'ngl', 'ipywidgets}, default 'ngl'
+            GUI style (with gui=True)
+        """
         if gui:
-            self._gui = self.player._display()
-            if use_box:
-                box = Box([self, self._gui])
-                box._gui_style = 'row'
-                return box
-            else:
-                display(self)
-                display(self._gui)
-                return None
+            if style == 'ipywidgets':
+                # For the old implementation
+                # is there anyone using this?
+                self.gui_style = None # turn off the NGL's GUI
+                self._gui = self.player._display()
+                self._gui.layout.align_self = 'stretch'
+                self._gui.layout.width = '400px'
+                b = HBox([self, self._gui])
+                def on(b):
+                    self.handle_resize()
+                b.on_displayed(on)
+                return b
+            elif style == 'ngl':
+                self.gui_style = 'ngl'
+                return self
         else:
             return self
 
@@ -532,6 +566,21 @@ class NGLWidget(DOMWidget):
         >>> view._set_size('50%', '50%')
         '''
         self._remote_call('setSize', target='Widget', args=[w, h])
+
+    def _set_sync_repr(self, other_views):
+        model_ids = {v._model_id for v in other_views}
+        self._synced_repr_model_ids = sorted(
+            set(self._synced_repr_model_ids) | model_ids)
+        self._remote_call("setSyncRepr",
+                          target="Widget",
+                          args=[self._synced_repr_model_ids])
+
+    def _set_unsync_repr(self, other_views):
+        model_ids = {v._model_id for v in other_views}
+        self._synced_repr_model_ids = list(set(self._synced_repr_model_ids) - model_ids)
+        self._remote_call("setSyncRepr",
+                          target="Widget",
+                          args=[self._synced_repr_model_ids])
 
     def _set_sync_camera(self, other_views):
         model_ids = {v._model_id for v in other_views}
@@ -557,12 +606,6 @@ class NGLWidget(DOMWidget):
                           args=[selection],
                           kwargs=dict(component_index=component,
                                       repr_index=repr_index))
-
-    def _show_notebook_command_box(self):
-        self._remote_call('showNotebookCommandBox', target='Widget')
-
-    def _hide_notebook_command_box(self):
-        self._remote_call('hideNotebookCommandBox', target='Widget')
 
     def color_by(self, color_scheme, component=0):
         '''update color for all representations of given component
@@ -600,9 +643,13 @@ class NGLWidget(DOMWidget):
 
     @representations.setter
     def representations(self, reps):
-        self._representations = reps[:]
-        for index in range(len(self._ngl_component_ids)):
-            self.set_representations(reps)
+        if isinstance(reps, dict):
+            self._remote_call("_set_representation_from_repr_dict",
+                    args=[reps])
+        else:
+            self._representations = reps[:]
+            for index in range(len(self._ngl_component_ids)):
+                self.set_representations(reps)
 
     def update_representation(self, component=0, repr_index=0, **parameters):
         """
@@ -681,9 +728,11 @@ class NGLWidget(DOMWidget):
 
         return RepresentationControl(self, component, repr_index, name=name)
 
-    def _set_coordinates(self, index):
+    def _set_coordinates(self, index, movie_making=False, render_params=None):
+        # FIXME: use movie_making here seems awkward.
         '''update coordinates for all trajectories at index-th frame
         '''
+        render_params = render_params or {}
         if self._trajlist:
             coordinates_dict = {}
             for trajectory in self._trajlist:
@@ -705,48 +754,39 @@ class NGLWidget(DOMWidget):
                 except (IndexError, ValueError):
                     coordinates_dict[traj_index] = np.empty((0), dtype='f4')
 
-            self.set_coordinates(coordinates_dict)
+            self.set_coordinates(coordinates_dict,
+                    render_params=render_params,
+                    movie_making=movie_making)
         else:
             print("no trajectory available")
 
-    def set_coordinates(self, arr_dict):
+    def set_coordinates(self, arr_dict, movie_making=False,
+            render_params=None):
         # type: (Dict[int, np.ndarray]) -> None
         """Used for update coordinates of a given trajectory
         >>> # arr: numpy array, ndim=2
         >>> # update coordinates of 1st trajectory
         >>> view.set_coordinates({0: arr})# doctest: +SKIP
         """
+        render_params = render_params or {}
         self._coordinates_dict = arr_dict
 
-        if not self._send_binary:
-            # DEPRECATED: This is not efficient, cause lots of lagging.
-            # should send binary
-            # send base64
-            encoded_coordinates_dict = {
-                k: encode_base64(v)
-                for (k, v) in self._coordinates_dict.items()
+        buffers = []
+        coordinates_meta = dict()
+        for index, arr in self._coordinates_dict.items():
+            buffers.append(arr.astype('f4').tobytes())
+            coordinates_meta[index] = index
+        msg = {
+                'type': 'binary_single',
+                'data': coordinates_meta,
             }
-            mytime = time.time() * 1000
-            self.send({
-                'type': 'base64_single',
-                'data': encoded_coordinates_dict,
-                'mytime': mytime
-            })
-        else:
-            # send binary
-            buffers = []
-            coordinates_meta = dict()
-            for index, arr in self._coordinates_dict.items():
-                buffers.append(arr.astype('f4').tobytes())
-                coordinates_meta[index] = index
-            mytime = time.time() * 1000
-            self.send(
-                {
-                    'type': 'binary_single',
-                    'data': coordinates_meta,
-                    'mytime': mytime
-                },
-                buffers=buffers)
+        if movie_making:
+            msg['movie_making'] = movie_making
+            msg['render_params'] = render_params,
+
+        self.send(
+            msg,
+            buffers=buffers)
 
     @observe('frame')
     def _on_frame_changed(self, change):
@@ -897,8 +937,6 @@ class NGLWidget(DOMWidget):
         method name might be changed
         '''
         self._widget_image._b64value = change['new']
-        if self._hold_image:
-            self._image_array.append(change['new'])
 
     def render_image(self,
                      frame=None,
@@ -992,6 +1030,11 @@ class NGLWidget(DOMWidget):
             elif frame < 0:
                 frame = self.max_frame
             self.frame = frame
+        elif msg_type == 'updateIDs':
+            self._ngl_view_id = msg['data']
+        elif msg_type == 'removeComponent':
+            cindex = int(msg['data'])
+            self._ngl_component_ids.pop(cindex)
         elif msg_type == 'repr_parameters':
             data_dict = self._ngl_msg.get('data')
             name = data_dict.pop('name') + '\n'
@@ -1238,9 +1281,6 @@ class NGLWidget(DOMWidget):
 
         self._update_component_auto_completion()
 
-    def _add_colorscheme(self, arr, name):
-        self._remote_call('addColorScheme', args=[arr, name])
-
     def _dry_run(self, func, *args, **kwargs):
         return _dry_run(self, func, *args, **kwargs)
 
@@ -1455,8 +1495,11 @@ class NGLWidget(DOMWidget):
             name = 'component_' + str(index)
             delattr(self, name)
 
+    def _js(self, code, **kwargs):
+        self._execute_js_code(code, **kwargs)
+
     def _execute_js_code(self, code, **kwargs):
-        self._remote_call('execute_code',
+        self._remote_call('executeCode',
                           target='Widget',
                           args=[code],
                           **kwargs)
@@ -1485,3 +1528,38 @@ class NGLWidget(DOMWidget):
         """
         for i, _ in enumerate(self._ngl_component_ids):
             yield self[i]
+
+
+class Fullscreen(DOMWidget):
+    """EXPERIMENTAL
+    """
+    _view_name = Unicode("FullscreenView").tag(sync=True)
+    _view_module = Unicode("nglview-js-widgets").tag(sync=True)
+    _view_module_version = Unicode(__frontend_version__).tag(sync=True)
+    _model_name = Unicode("FullscreenModel").tag(sync=True)
+    _model_module = Unicode("nglview-js-widgets").tag(sync=True)
+    _model_module_version = Unicode(__frontend_version__).tag(sync=True)
+
+    _is_fullscreen = Bool().tag(sync=True)
+
+    def __init__(self, target, views):
+        super().__init__()
+        self._target = target
+        self._views = views
+
+    def fullscreen(self):
+        self._js("this.fullscreen('%s')" % self._target.model_id)
+
+    def _js(self, code):
+        msg = {"executeCode": code}
+        self.send(msg)
+
+    @observe('_is_fullscreen')
+    def _fullscreen_changed(self, change):
+        if not change.new:
+            self._target.layout.height = '300px'
+        self.handle_resize()
+
+    def handle_resize(self):
+        for v in self._views:
+            v.handle_resize()

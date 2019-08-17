@@ -1,3 +1,4 @@
+from typing import List
 try:
     import moviepy.editor as mpy
 except ImportError:
@@ -8,6 +9,8 @@ except ImportError:
 import os
 import threading
 import time
+from ipywidgets import Button, Output, IntProgress
+from itertools import tee
 
 
 class MovieMaker:
@@ -109,17 +112,20 @@ class MovieMaker:
         self.timeout = timeout
         self.fps = fps
         self.in_memory = in_memory
-        self.render_params = render_params if render_params is not None else {}
-        self.moviepy_params = moviepy_params if moviepy_params is not None else {}
+        self.render_params = render_params or dict(
+                     factor=4,
+                     antialias=True,
+                     trim=False,
+                     transparent=False)
+        self.moviepy_params = moviepy_params or {}
         self.perframe_hook = perframe_hook
-        if self.render_params is not None:
-            assert isinstance(self.render_params, dict)
-        if self.moviepy_params is not None:
-            assert isinstance(self.moviepy_params, dict)
         self.output = output
         if stop < 0:
             stop = self.view.max_frame + 1
         self._time_range = range(start, stop, step)
+        self._iframe = iter(self._time_range)
+        self._progress = IntProgress(max=len(self._time_range)-1)
+        self._woutput = Output()
         self._event = threading.Event()
         self._thread = None
         self._image_array = []
@@ -127,14 +133,17 @@ class MovieMaker:
     def sleep(self):
         time.sleep(self.timeout)
 
-    def make(self, in_memory=False):
+    def make_old_impl(self, in_memory=False):
         # TODO : make base class so we can reuse this with sandbox/base.py
+        progress = IntProgress(description='Rendering...', max=len(self._time_range)-1)
         self._event = threading.Event()
 
         def _make(event):
             image_files = []
+            iw = None
             if not self.skip_render:
                 for i in self._time_range:
+                    progress.value = i
                     if not event.is_set():
                         self.view.frame = i
                         self.sleep()
@@ -146,12 +155,14 @@ class MovieMaker:
                                 self.prefix + '.' + str(i) + '.png',
                                 **self.render_params)
                         else:
-                            self.view.render_image(**self.render_params)
+                            iw = self.view.render_image(**self.render_params)
                         self.sleep()
                         if self.in_memory:
                             rgb = self._base64_to_ndarray(
                                 self.view._image_data)
                             self._image_array.append(rgb)
+                            if iw:
+                                iw.close() # free memory
                 if not self.in_memory:
                     template = "{}/{}.{}.png"
                     image_files = [
@@ -163,20 +174,80 @@ class MovieMaker:
                 else:
                     image_files = self._image_array
             if not self._event.is_set():
+                progress.description = "Writing ..."
                 clip = mpy.ImageSequenceClip(image_files, fps=self.fps)
-                if self.output.endswith('.gif'):
-                    clip.write_gif(self.output,
-                                   fps=self.fps,
-                                   **self.moviepy_params)
-                else:
-                    clip.write_videofile(self.output,
-                                         fps=self.fps,
-                                         **self.moviepy_params)
+                with Output():
+                    if self.output.endswith('.gif'):
+                        clip.write_gif(self.output,
+                                       fps=self.fps,
+                                       verbose=False,
+                                       **self.moviepy_params)
+                    else:
+                        clip.write_videofile(self.output,
+                                             fps=self.fps,
+                                             **self.moviepy_params)
                 self._image_array = []
+                progress.description = 'Done'
+                time.sleep(1)
+                progress.close()
 
         self.thread = threading.Thread(target=_make, args=(self._event, ))
         self.thread.daemon = True
         self.thread.start()
+        return progress
+    
+    def make(self, movie=True, keep_data=False):
+        """ 
+
+        Parameters
+        ----------
+        keep_data: bool
+            if True, save the image data in self._image_array
+        movie: bool
+            if True, make the movie
+            else, only do the rendering (make sure keep_data=True in this case)
+        """
+        image_array = []
+        iframe = tee(self._iframe, 1)[0]
+        # trigger movie making communication between backend and frontend
+        self.view._set_coordinates(next(iframe), movie_making=True,
+                render_params=self.render_params)
+        self._progress.description = 'Rendering ...'
+        def on_msg(widget, msg, _):
+            if msg['type'] == 'movie_image_data':
+                image_array.append(msg.get('data'))
+                try:
+                    frame = next(iframe)
+                    self.view._set_coordinates(frame, movie_making=True,
+                            render_params=self.render_params)
+                    self._progress.value = frame
+                except StopIteration:
+                    self._progress.description = 'Making...'
+                    with self._woutput:
+                        # suppress moviepy's log
+                        self._make_from_array(image_array)
+                    self._remove_on_msg()
+                    self._progress.description = 'Done'
+                    if keep_data:
+                        self._image_array = image_array
+        self._on_msg = on_msg
+        # FIXME: if exception happens, the on_msg callback will be never removed
+        # from `self.view`
+        self.view.on_msg(on_msg)
+        return self._progress
+
+    def _remove_on_msg(self):
+        self.view.on_msg(self._on_msg, remove=True)
+
+    def _make_from_array(self, image_array: List[str]):
+        image_files = [self._base64_to_ndarray(a) for a in image_array]
+        clip = mpy.ImageSequenceClip(image_files, fps=self.fps)
+        with self._woutput:
+            if self.output.endswith('.gif'):
+                clip.write_gif(self.output,
+                               fps=self.fps,
+                               verbose=False,
+                               **self.moviepy_params)
 
     def interupt(self):
         """ Stop making process """
